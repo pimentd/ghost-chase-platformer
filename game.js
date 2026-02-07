@@ -65,10 +65,11 @@
     hasSword: false,
     swordUntil: 0,
     attackUntil: 0,
+    attackDir: "right", // "left" | "right" | "up" | "down"
   };
 
   const ghost = {
-    // ghost position is tracked relative to world scroll too (screen-space)
+    // ghost position is tracked in screen-space
     x: -40,
     y: 60,
     w: 34,
@@ -121,9 +122,6 @@
     const w = irand(28, 70);
     const y = irand(70, 135);
 
-    // Keep platforms reachable from typical jump
-    // If too high, lower it
-    const maxReachY = 92; // rough
     const yy = clamp(y, 60, groundY - 12);
 
     platforms.push({
@@ -194,16 +192,30 @@
       player.onGround = false;
     }
 
-    // Attack
+    // Attack (directional toward ghost)
     if (attackPressed && player.hasSword) {
-      player.attackUntil = now + 140; // brief attack window
+      player.attackUntil = now + 140;
+
+      // Determine attack direction toward ghost (screen-space)
+      const px = player.x + player.w / 2;
+      const py = player.y + player.h / 2;
+      const gx = ghost.x + ghost.w / 2;
+      const gy = ghost.y + ghost.h / 2;
+
+      const dx = gx - px;
+      const dy = gy - py;
+
+      if (Math.abs(dx) > Math.abs(dy)) {
+        player.attackDir = dx > 0 ? "right" : "left";
+      } else {
+        player.attackDir = dy > 0 ? "down" : "up";
+      }
     }
 
-    // Let player "run" with slight control: right accelerates, left brakes (optional)
+    // Let player "run" with slight control
     const right = keys.has("arrowright") || keys.has("d");
     const left  = keys.has("arrowleft") || keys.has("a");
 
-    // We keep forward motion mostly via world scroll; player can adjust a bit.
     const ax = 240;
     if (right) player.vx += ax * dt;
     if (left)  player.vx -= ax * dt;
@@ -269,9 +281,7 @@
     }
 
     // Ghost position: it moves right in screen space chasing player
-    // Baseline: ghost creeps in from left; if repelled, it gets shoved back.
     if (now < ghost.pushedBackUntil) {
-      // while pushed back, it lags more
       ghost.x -= 60 * dt;
     } else {
       ghost.x += (ghost.speed - baseScroll) * dt + 14 * dt; // net gain
@@ -283,15 +293,26 @@
     // Player attack hitbox and ghost collision
     const ghostBox = { x: ghost.x, y: ghost.y, w: ghost.w, h: ghost.h };
     const attackActive = player.attackUntil > now;
+
     if (attackActive) {
-      const hit = {
-        x: player.x + player.w - 1,
-        y: player.y + 4,
-        w: 16,
-        h: 10,
-      };
+      let hit;
+
+      switch (player.attackDir) {
+        case "right":
+          hit = { x: player.x + player.w, y: player.y + 4, w: 14, h: 8 };
+          break;
+        case "left":
+          hit = { x: player.x - 14, y: player.y + 4, w: 14, h: 8 };
+          break;
+        case "up":
+          hit = { x: player.x + 2, y: player.y - 14, w: 6, h: 14 };
+          break;
+        case "down":
+          hit = { x: player.x + 2, y: player.y + player.h, w: 6, h: 14 };
+          break;
+      }
+
       if (aabb(hit, ghostBox)) {
-        // repel ghost
         ghostsRepelled++;
         ghost.x -= 70; // shove left
         ghost.pushedBackUntil = now + 700; // short grace period
@@ -342,9 +363,9 @@
     // Player
     drawStickman(player.x, player.y, player.hasSword);
 
-    // Attack effect
+    // Attack effect (directional)
     if (player.attackUntil > now) {
-      drawSlash(player.x + player.w, player.y + 7);
+      drawSlash(player, player.attackDir);
     }
 
     // HUD
@@ -355,7 +376,7 @@
     let status = `Time: ${tSec.toFixed(2)}s\nBest: ${best.toFixed(2)}s\nGhost repelled: ${ghostsRepelled}\n${swordLine}\n`;
     if (player.hasSword) {
       const left = Math.max(0, (player.swordUntil - now) / 1000);
-      status += `Sword power: ${left.toFixed(1)}s\nAttack: X`;
+      status += `Sword power: ${left.toFixed(1)}s\nAttack: X\nAim: ${player.attackDir.toUpperCase()}`;
     } else {
       status += `No sword`;
     }
@@ -479,11 +500,37 @@
     ctx.fillRect(x + 3, y + 9, 2, 1); // pommel
   }
 
-  function drawSlash(x, y) {
+  function drawSlash(player, dir) {
     ctx.fillStyle = "rgba(230,240,255,0.9)";
-    ctx.fillRect(Math.floor(x), Math.floor(y), 12, 1);
-    ctx.fillRect(Math.floor(x + 2), Math.floor(y - 1), 10, 1);
-    ctx.fillRect(Math.floor(x + 4), Math.floor(y + 1), 8, 1);
+
+    const x = player.x;
+    const y = player.y;
+
+    switch (dir) {
+      case "right":
+        ctx.fillRect(Math.floor(x + player.w), Math.floor(y + 7), 12, 1);
+        ctx.fillRect(Math.floor(x + player.w + 2), Math.floor(y + 6), 10, 1);
+        ctx.fillRect(Math.floor(x + player.w + 4), Math.floor(y + 8), 8, 1);
+        break;
+
+      case "left":
+        ctx.fillRect(Math.floor(x - 12), Math.floor(y + 7), 12, 1);
+        ctx.fillRect(Math.floor(x - 10), Math.floor(y + 6), 10, 1);
+        ctx.fillRect(Math.floor(x - 8), Math.floor(y + 8), 8, 1);
+        break;
+
+      case "up":
+        ctx.fillRect(Math.floor(x + 4), Math.floor(y - 12), 1, 12);
+        ctx.fillRect(Math.floor(x + 3), Math.floor(y - 10), 1, 10);
+        ctx.fillRect(Math.floor(x + 5), Math.floor(y - 8), 1, 8);
+        break;
+
+      case "down":
+        ctx.fillRect(Math.floor(x + 4), Math.floor(y + player.h), 1, 12);
+        ctx.fillRect(Math.floor(x + 3), Math.floor(y + player.h + 2), 1, 10);
+        ctx.fillRect(Math.floor(x + 5), Math.floor(y + player.h + 4), 1, 8);
+        break;
+    }
   }
 
   function drawGameOver(tSec) {
@@ -511,6 +558,7 @@
     player.hasSword = false;
     player.swordUntil = 0;
     player.attackUntil = 0;
+    player.attackDir = "right";
 
     ghost.x = -40;
     ghost.y = 60;
