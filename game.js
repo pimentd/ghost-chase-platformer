@@ -1,8 +1,6 @@
 // game.js — Ghost Chase Platformer
-// - Pixel-art assets (assets/*.png)
-// - Better platformer feel: variable jump, coyote/buffer, start screen + grace period
-// - Directional sword strike toward ghost
-// - WebAudio SFX + light chiptune pulse music (starts after first click/key)
+// Update: "Stable ground lane" always exists (a continuous baseline), while still allowing
+// occasional ground gaps to jump. Platforms above remain as before.
 
 (() => {
   // ===================== Canvas =====================
@@ -63,7 +61,6 @@
   // Screen shake
   let shakeT = 0;
   let shakeMag = 0;
-
   function addShake(mag, time = 0.12) {
     shakeMag = Math.max(shakeMag, mag);
     shakeT = Math.max(shakeT, time);
@@ -91,7 +88,7 @@
 
       if (!musicGain) {
         musicGain = audioCtx.createGain();
-        musicGain.gain.value = 0.02; // very light
+        musicGain.gain.value = 0.02;
         musicGain.connect(audioCtx.destination);
       }
 
@@ -222,7 +219,6 @@
 
   const AS = {};
   const assetOK = {};
-
   function loadAssets(cb) {
     const names = Object.keys(assetList);
     let doneCount = 0;
@@ -244,7 +240,6 @@
       AS[name] = img;
     }
   }
-
   function assetSummary() {
     const needed = Object.keys(assetList);
     const ok = needed.filter((k) => assetOK[k]).length;
@@ -294,37 +289,27 @@
 
   // ===================== World =====================
   const groundY = 140;
-  const platforms = [];
+
+  // Split into: stable "ground segments" + "upper platforms"
+  const ground = [];     // segments at y=groundY
+  const platforms = [];  // upper platforms (y < groundY)
+
+  function addGroundSeg(x, w) {
+    ground.push({ x, y: groundY, w, h: 40 });
+  }
   function addPlatform(x, y, w) {
     platforms.push({ x, y, w, h: 10 });
   }
 
-  function seedWorld() {
-    platforms.length = 0;
-    camX = 0;
-    baseScroll = 90;
-    ghostsRepelled = 0;
+  // Ground generation settings:
+  // Mostly continuous, with occasional gaps.
+  const GROUND_GAP_CHANCE = 0.16; // chance a segment is a gap when generating
+  const GROUND_SEG_W_MIN = 220;
+  const GROUND_SEG_W_MAX = 420;
+  const GROUND_GAP_MIN = 70;
+  const GROUND_GAP_MAX = 150;
 
-    // ground
-    platforms.push({ x: -300, y: groundY, w: 3000, h: 40 });
-
-    // start platforms
-    let x = 140;
-    for (let i = 0; i < 12; i++) {
-      addPlatform(x, irand(72, 120), irand(40, 92));
-      x += irand(80, 150);
-    }
-
-    sword = null;
-    nextSwordSpawnAt = 0;
-
-    // Reset generator mood
-    genMode = "easy";
-    genModeLeft = irand(4, 7);
-    lastPlatY = irand(90, 118);
-  }
-
-  // More “gamey” endless generator (easy runs, stairs, gaps)
+  // Upper platform generator mood
   let genMode = "easy";
   let genModeLeft = 6;
   let lastPlatY = 110;
@@ -332,17 +317,68 @@
   function pickGenMode() {
     const r = Math.random();
     if (r < 0.55) return "easy";
-    if (r < 0.80) return "stairs";
+    if (r < 0.8) return "stairs";
     return "gaps";
   }
 
+  function seedWorld() {
+    camX = 0;
+    baseScroll = 90;
+    ghostsRepelled = 0;
+
+    ground.length = 0;
+    platforms.length = 0;
+
+    // Start with a long stable ground so you can breathe
+    addGroundSeg(-600, 2600);
+
+    // Seed some initial upper platforms
+    let x = 160;
+    for (let i = 0; i < 10; i++) {
+      addPlatform(x, irand(78, 120), irand(56, 110));
+      x += irand(90, 160);
+    }
+
+    sword = null;
+    nextSwordSpawnAt = 3; // first sword ~3s in
+
+    genMode = "easy";
+    genModeLeft = irand(4, 7);
+    lastPlatY = irand(92, 118);
+  }
+
+  // Ensure ground exists ahead, with occasional gaps
+  function ensureGroundAhead() {
+    let far = -Infinity;
+    for (const g of ground) far = Math.max(far, g.x + g.w);
+    if (far === -Infinity) far = camX - 500;
+
+    while (far < camX + W + 600) {
+      const makeGap = Math.random() < GROUND_GAP_CHANCE;
+
+      if (makeGap) {
+        // advance by gap (no segment)
+        far += irand(GROUND_GAP_MIN, GROUND_GAP_MAX);
+      } else {
+        const w = irand(GROUND_SEG_W_MIN, GROUND_SEG_W_MAX);
+        addGroundSeg(far, w);
+        far += w;
+      }
+    }
+
+    // cleanup
+    for (let i = ground.length - 1; i >= 0; i--) {
+      const g = ground[i];
+      if (g.x + g.w < camX - 900) ground.splice(i, 1);
+    }
+  }
+
+  // Upper platforms generator (independent of ground)
   function ensurePlatformsAhead() {
-    // find farthest right edge
     let far = 0;
     for (const p of platforms) far = Math.max(far, p.x + p.w);
 
-    // generate until comfortably ahead
-    while (far < camX + W + 320) {
+    while (far < camX + W + 420) {
       if (genModeLeft <= 0) {
         genMode = pickGenMode();
         genModeLeft = genMode === "easy" ? irand(5, 9) : irand(4, 7);
@@ -356,15 +392,12 @@
       if (genMode === "easy") {
         gap = irand(70, 120);
         w = irand(56, 110);
-        // gentle height drift
         y = clamp(lastPlatY + irand(-10, 10), 76, 124);
       } else if (genMode === "stairs") {
         gap = irand(70, 110);
         w = irand(50, 90);
-        // step up/down more strongly
         y = clamp(lastPlatY + irand(-18, 18), 68, 124);
       } else {
-        // gaps mode: fewer, more dramatic
         gap = irand(110, 165);
         w = irand(44, 84);
         y = clamp(lastPlatY + irand(-14, 14), 70, 124);
@@ -376,10 +409,9 @@
       far = nextX + w;
     }
 
-    // cleanup far behind
     for (let i = platforms.length - 1; i >= 0; i--) {
       const p = platforms[i];
-      if (p.x + p.w < camX - 400 && p.x > -1000) platforms.splice(i, 1);
+      if (p.x + p.w < camX - 600) platforms.splice(i, 1);
     }
   }
 
@@ -418,15 +450,16 @@
   function maybeSpawnSword(tSec) {
     if (tSec < nextSwordSpawnAt) return;
 
+    // Prefer upper platforms; if none, place slightly above ground
     const candidates = platforms.filter(
-      (p) => p.x > camX + 80 && p.x < camX + W + 320 && p.y < groundY
+      (p) => p.x > camX + 90 && p.x < camX + W + 420
     );
     const p = candidates.length
       ? candidates[irand(0, candidates.length - 1)]
       : null;
 
     const sx = p ? p.x + p.w * 0.5 - 4 : camX + W + 140;
-    const sy = p ? p.y - 12 : groundY - 38;
+    const sy = p ? p.y - 12 : groundY - 22;
 
     sword = { x: sx, y: sy, w: 10, h: 12, active: true };
     nextSwordSpawnAt = tSec + 20;
@@ -439,31 +472,32 @@
     MOVE_GROUND = 0.82;
   const COYOTE_TIME = 0.12;
   const JUMP_BUFFER = 0.12;
-
-  // Variable jump: releasing early cuts upward velocity (classic platformer feel)
   const JUMP_CUT = 0.55;
 
   // ===================== Ghost AI =====================
   function updateGhost(dt, tSec) {
     ghost.stateTime += dt;
 
-    // difficulty scaling
     baseScroll = 90 + tSec * 2.0 + ghostsRepelled * 0.8;
     ghost.speed = baseScroll * (1.03 + Math.min(0.35, tSec / 80));
 
     const inGrace = now < graceUntil;
 
-    // occasional lunge after 45s (but not during grace)
-    if (!inGrace && tSec > 45 && ghost.state !== "lunge" && Math.random() < 0.002) {
+    if (
+      !inGrace &&
+      tSec > 45 &&
+      ghost.state !== "lunge" &&
+      Math.random() < 0.002
+    ) {
       ghost.state = "lunge";
       ghost.stateTime = 0;
     }
 
     if (inGrace) {
-      // hold ghost back during grace period
       ghost.x = Math.min(ghost.x, 20);
     } else if (ghost.state === "lunge") {
-      if (ghost.stateTime < 0.6) ghost.x += (ghost.speed * 1.6 - baseScroll) * dt + 26 * dt;
+      if (ghost.stateTime < 0.6)
+        ghost.x += (ghost.speed * 1.6 - baseScroll) * dt + 26 * dt;
       else ghost.state = "calm";
     } else {
       if (now < ghost.pushedBackUntil) ghost.x -= 120 * dt;
@@ -528,27 +562,40 @@
 
     drawTiled(AS.bg_far, 0.18);
     drawTiled(AS.bg_mid, 0.35);
-    drawTiled(AS.bg_near, 0.70);
+    drawTiled(AS.bg_near, 0.7);
 
-    // subtle mist band
     ctx.fillStyle = "rgba(120,140,255,0.03)";
     ctx.fillRect(0, 92, W, 46);
   }
 
-  function drawPlatform(p) {
-    const sx = Math.floor(p.x - camX);
+  function drawTilesBar(x, y, w, h) {
+    // draw using tiles.png if present
     if (AS.tiles && AS.tiles.width) {
-      const tw = 8,
-        th = 8;
-      const cols = Math.ceil(p.w / tw);
+      const tw = 8, th = 8;
+      const cols = Math.ceil(w / tw);
       for (let i = 0; i < cols; i++) {
-        const dx = sx + i * tw;
-        ctx.drawImage(AS.tiles, 0, 0, tw, th, dx, p.y, tw, th);
+        const dx = x + i * tw;
+        ctx.drawImage(AS.tiles, 0, 0, tw, th, dx, y, tw, th);
+      }
+      // thickness fill (optional)
+      if (h > th) {
+        ctx.fillStyle = "rgba(18,22,44,0.8)";
+        ctx.fillRect(x, y + th, w, h - th);
       }
     } else {
       ctx.fillStyle = "#2a2f4a";
-      ctx.fillRect(sx, p.y, p.w, p.h);
+      ctx.fillRect(x, y, w, h);
     }
+  }
+
+  function drawGroundSeg(g) {
+    const sx = Math.floor(g.x - camX);
+    drawTilesBar(sx, g.y, g.w, g.h);
+  }
+
+  function drawPlatform(p) {
+    const sx = Math.floor(p.x - camX);
+    drawTilesBar(sx, p.y, p.w, p.h);
   }
 
   function drawSwordPickup() {
@@ -567,22 +614,17 @@
     const x = Math.floor(px);
     const y = Math.floor(py);
     ctx.fillStyle = "#e8eefc";
-    // head
     ctx.fillRect(x + 3, y + 0, 6, 6);
-    // body
     ctx.fillRect(x + 5, y + 6, 2, 8);
-    // arms
     ctx.fillRect(x + 1, y + 8, 4, 2);
     ctx.fillRect(x + 7, y + 8, 4, 2);
-    // legs
     ctx.fillRect(x + 3, y + 14, 2, 6);
     ctx.fillRect(x + 7, y + 14, 2, 6);
   }
 
   function drawPlayer() {
     if (AS.player && AS.player.width) {
-      const fw = 48,
-        fh = 48;
+      const fw = 48, fh = 48;
       const cols = Math.max(1, Math.floor(AS.player.width / fw));
       let row = 0;
       if (player.attackUntil > now) row = 3;
@@ -592,7 +634,6 @@
       const fps = row === 1 ? 12 : 8;
       const frame = Math.floor((now / 1000) * fps) % cols;
 
-      // Align sprite feet with hitbox bottom
       const feetY = player.y + player.h;
       const dx = Math.floor(player.x - 18);
       const dy = Math.floor(feetY - fh);
@@ -605,24 +646,13 @@
 
   function drawGhost() {
     if (AS.ghost && AS.ghost.width) {
-      const fw = 64,
-        fh = 64;
+      const fw = 64, fh = 64;
       const cols = Math.max(1, Math.floor(AS.ghost.width / fw));
       const fps = ghost.state === "lunge" ? 10 : 6;
       const frame = Math.floor((now / 1000) * fps) % cols;
 
       ctx.globalAlpha = 0.95;
-      ctx.drawImage(
-        AS.ghost,
-        frame * fw,
-        0,
-        fw,
-        fh,
-        Math.floor(ghost.x),
-        Math.floor(ghost.y),
-        fw,
-        fh
-      );
+      ctx.drawImage(AS.ghost, frame * fw, 0, fw, fh, Math.floor(ghost.x), Math.floor(ghost.y), fw, fh);
       ctx.globalAlpha = 1;
     } else {
       ctx.fillStyle = "rgba(210,220,255,0.85)";
@@ -632,12 +662,10 @@
 
   function drawAttackEffect() {
     if (player.attackUntil <= now) return;
-    const x = player.x,
-      y = player.y;
+    const x = player.x, y = player.y;
     ctx.fillStyle = "rgba(230,240,255,0.98)";
     if (player.attackDir === "right") ctx.fillRect(x + player.w, y + 7, 16, 2);
-    else if (player.attackDir === "left")
-      ctx.fillRect(x - 16, y + 7, 16, 2);
+    else if (player.attackDir === "left") ctx.fillRect(x - 16, y + 7, 16, 2);
     else if (player.attackDir === "up") ctx.fillRect(x + 5, y - 16, 2, 16);
     else ctx.fillRect(x + 5, y + player.h, 2, 16);
   }
@@ -661,14 +689,20 @@
 
     if (!started && !gameOver) {
       status += `\n\nPress SPACE / ↑ to start`;
-      status += `\nThen survive as long as you can.`;
     } else if (now < graceUntil && !gameOver) {
       status += `\n\nGrace: ${(Math.max(0, (graceUntil - now) / 1000)).toFixed(1)}s`;
     }
 
     if (gameOver) status += `\n\nGAME OVER\n${gameOverReason}\nPress R`;
-
     hudEl.textContent = status;
+  }
+
+  // ===================== Physics collision =====================
+  function landOn(p) {
+    player.y = p.y - player.h;
+    player.vy = 0;
+    player.onGround = true;
+    player.coyote = COYOTE_TIME;
   }
 
   // ===================== Step =====================
@@ -676,42 +710,41 @@
     tickMusic();
 
     const tSec = (now - startedAt) / 1000;
+
+    // keep world ahead
+    ensureGroundAhead();
+    ensurePlatformsAhead();
     maybeSpawnSword(tSec);
 
     if (wasPressed("r")) restart();
 
-    // Start gating: first jump or move begins run
     if (!started && !gameOver) {
       const startPressed =
         wasPressed(" ") || wasPressed("arrowup") || wasPressed("d") || wasPressed("arrowright");
       if (startPressed) {
         started = true;
         graceUntil = now + 2000;
-        ensureAudio(); // kick audio when game starts (still requires gesture)
+        ensureAudio();
       } else {
-        // allow idle animations without physics
         return;
       }
     }
-
     if (gameOver) return;
 
     const jumpPressed = wasPressed(" ") || wasPressed("arrowup");
     const attackPressed = wasPressed("x");
 
-    // coyote / buffer
+    // coyote/buffer
     player.coyote -= dt;
     player.jumpBuffer -= dt;
     if (jumpPressed) player.jumpBuffer = JUMP_BUFFER;
 
-    // horizontal movement
+    // horizontal
     const right = keys.has("arrowright") || keys.has("d");
     const left = keys.has("arrowleft") || keys.has("a");
     const ax = 900;
-
     if (right) player.vx += ax * dt;
     if (left) player.vx -= ax * dt;
-
     player.vx *= player.onGround ? MOVE_GROUND : MOVE_AIR;
     player.vx = clamp(player.vx, -160, 180);
 
@@ -720,37 +753,51 @@
     player.x += player.vx * dt;
     player.y += player.vy * dt;
 
-    // keep in band
+    // keep in lane
     player.x = clamp(player.x, 36, 160);
 
-    // collisions (vertical landing)
+    // collisions: check ground segments + upper platforms
     player.onGround = false;
+
     const worldP = { x: player.x + camX, y: player.y, w: player.w, h: player.h };
+    const prevY = player.y - player.vy * dt;
+    const wasAbove = prevY + player.h;
 
-    for (const p of platforms) {
-      if (worldP.x + worldP.w > p.x && worldP.x < p.x + p.w) {
-        const prevY = player.y - player.vy * dt;
-        const wasAbove = prevY + player.h <= p.y + 1;
+    const skin = 6;
+
+    // ---- land on ground segments ----
+    for (const g of ground) {
+      // overlap in X?
+      if (worldP.x + worldP.w > g.x && worldP.x < g.x + g.w) {
+        const wasAboveGround = wasAbove <= g.y + 1;
         const isFalling = player.vy >= 0;
-
-        // forgiving landing window (skin)
-        const skin = 6;
-        const hitsTop =
-          player.y + player.h >= p.y && player.y + player.h <= p.y + skin;
-
-        if (wasAbove && isFalling && hitsTop) {
-          player.y = p.y - player.h;
-          player.vy = 0;
-          player.onGround = true;
-          player.coyote = COYOTE_TIME;
+        const hitsTop = player.y + player.h >= g.y && player.y + player.h <= g.y + skin;
+        if (wasAboveGround && isFalling && hitsTop) {
+          landOn(g);
+          break;
         }
       }
     }
 
-    // death by fall
-    if (player.y > H + 40) triggerGameOver("You fell!");
+    // ---- land on platforms ----
+    if (!player.onGround) {
+      for (const p of platforms) {
+        if (worldP.x + worldP.w > p.x && worldP.x < p.x + p.w) {
+          const wasAbovePlat = wasAbove <= p.y + 1;
+          const isFalling = player.vy >= 0;
+          const hitsTop = player.y + player.h >= p.y && player.y + player.h <= p.y + skin;
+          if (wasAbovePlat && isFalling && hitsTop) {
+            landOn(p);
+            break;
+          }
+        }
+      }
+    }
 
-    // buffered jump with coyote
+    // fall death
+    if (player.y > H + 60) triggerGameOver("You fell!");
+
+    // jump
     if (player.jumpBuffer > 0 && player.coyote > 0) {
       player.vy = -JUMP_V;
       player.onGround = false;
@@ -759,25 +806,17 @@
       sfx("jump");
     }
 
-    // variable jump: if you release jump while rising, cut velocity
+    // variable jump
     const jumpHeld = keys.has(" ") || keys.has("arrowup");
-    if (!jumpHeld && player.vy < 0) {
-      player.vy *= JUMP_CUT;
-    }
+    if (!jumpHeld && player.vy < 0) player.vy *= JUMP_CUT;
 
     // attack direction toward ghost
     if (attackPressed && player.hasSword && player.attackUntil <= now) {
       player.attackUntil = now + 140;
-
-      const px = player.x + player.w / 2,
-        py = player.y + player.h / 2;
-      const gx = ghost.x + ghost.w / 2,
-        gy = ghost.y + ghost.h / 2;
-      const dx = gx - px,
-        dy = gy - py;
-
-      if (Math.abs(dx) > Math.abs(dy))
-        player.attackDir = dx > 0 ? "right" : "left";
+      const px = player.x + player.w / 2, py = player.y + player.h / 2;
+      const gx = ghost.x + ghost.w / 2, gy = ghost.y + ghost.h / 2;
+      const dx = gx - px, dy = gy - py;
+      if (Math.abs(dx) > Math.abs(dy)) player.attackDir = dx > 0 ? "right" : "left";
       else player.attackDir = dy > 0 ? "down" : "up";
     }
 
@@ -793,40 +832,31 @@
       }
     }
 
-    // sword expiry
+    // sword expires
     if (player.hasSword && now > player.swordUntil) {
       player.hasSword = false;
       player.attackUntil = 0;
     }
 
-    // ghost movement + difficulty
+    // ghost
     updateGhost(dt, tSec);
 
     // hit detect
     const ghostBox = { x: ghost.x, y: ghost.y, w: ghost.w, h: ghost.h };
+
     if (player.attackUntil > now) {
       let hit;
       switch (player.attackDir) {
-        case "right":
-          hit = { x: player.x + player.w, y: player.y + 4, w: 18, h: 10 };
-          break;
-        case "left":
-          hit = { x: player.x - 18, y: player.y + 4, w: 18, h: 10 };
-          break;
-        case "up":
-          hit = { x: player.x + 3, y: player.y - 18, w: 8, h: 18 };
-          break;
-        case "down":
-          hit = { x: player.x + 3, y: player.y + player.h, w: 8, h: 18 };
-          break;
+        case "right": hit = { x: player.x + player.w, y: player.y + 4, w: 18, h: 10 }; break;
+        case "left":  hit = { x: player.x - 18, y: player.y + 4, w: 18, h: 10 }; break;
+        case "up":    hit = { x: player.x + 3, y: player.y - 18, w: 8, h: 18 }; break;
+        case "down":  hit = { x: player.x + 3, y: player.y + player.h, w: 8, h: 18 }; break;
       }
 
       if (hit && aabb(hit, ghostBox)) {
         ghostsRepelled++;
-
-        // big pushback + feel effects
-        ghost.x -= 160;
-        ghost.pushedBackUntil = now + 800;
+        ghost.x -= 170;
+        ghost.pushedBackUntil = now + 900;
 
         spawnParticles(ghost.x + ghost.w * 0.5, ghost.y + ghost.h * 0.5, 18);
         sfx("hit");
@@ -840,14 +870,13 @@
 
     // camera scroll
     camX += baseScroll * dt;
-    ensurePlatformsAhead();
   }
 
   // ===================== Draw =====================
   function draw() {
     const tSec = (now - startedAt) / 1000;
 
-    // Shake transform
+    // shake offset
     let ox = 0, oy = 0;
     if (shakeT > 0) {
       shakeT -= Math.min(shakeT, 1 / 60);
@@ -862,9 +891,17 @@
 
     drawBackground();
 
+    // draw ground segments first (stable lane)
+    for (const g of ground) {
+      const sx = Math.floor(g.x - camX);
+      if (sx + g.w < -150 || sx > W + 150) continue;
+      drawGroundSeg(g);
+    }
+
+    // draw upper platforms
     for (const p of platforms) {
       const sx = Math.floor(p.x - camX);
-      if (sx + p.w < -100 || sx > W + 100) continue;
+      if (sx + p.w < -150 || sx > W + 150) continue;
       drawPlatform(p);
     }
 
@@ -900,8 +937,8 @@
 
   // ===================== Boot =====================
   loadAssets(() => {
-    restart();        // sets seedWorld + resets state
-    // restart() called seedWorld; we want the title screen state, so undo start:
+    restart(); // seeds world
+    // return to title state
     started = false;
     gameOver = false;
     gameOverReason = "";
